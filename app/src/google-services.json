@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "367090623924",
+    "project_id": "stravaconle",
+    "storage_bucket": "stravaconle.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:367090623924:android:6b832ef13878b684f07ee1",
+        "android_client_info": {
+          "package_name": "co.uk.doverguitarteacher.activpal"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDctJUuZhHKhbTH5_8u5Cu_CuXP6aTesQg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
