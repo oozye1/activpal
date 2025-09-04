@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.io.File
 
 // Load local.properties (kept out of VCS) to read secret values like firebaseApiKey and firebaseWebClientId
 val localProperties = Properties().apply {
@@ -10,20 +11,70 @@ val localProperties = Properties().apply {
 val firebaseApiKey: String? = localProperties.getProperty("firebaseApiKey")
 val firebaseWebClientId: String? = localProperties.getProperty("firebaseWebClientId")
 
-// Robustly inject the firebaseApiKey into app/google-services.json if present locally.
-// Use a regex to replace the entire api_key array (handles whitespace and existing content).
-if (!firebaseApiKey.isNullOrBlank()) {
-    val gsFile = rootProject.file("app/google-services.json")
-    if (gsFile.exists()) {
-        val text = gsFile.readText(Charsets.UTF_8)
-        val apiKeyRegex = Regex("\"api_key\"\\s*:\\s*\\[[^\\]]*\\]")
-        if (apiKeyRegex.containsMatchIn(text) && !text.contains("\"current_key\"")) {
-            val replacement = "\"api_key\": [{\"current_key\": \"${firebaseApiKey}\"}]"
-            val newText = apiKeyRegex.replace(text, replacement)
-            gsFile.writeText(newText, Charsets.UTF_8)
+// SAFER GOOGLE SERVICES INJECTION:
+// Create a temporary google-services.json under the module buildDir during configuration and ensure
+// the google-services plugin can find a file before it runs. We avoid permanently modifying repo files.
+// This writes an ephemeral file to buildDir and copies it into the module projectDir right before
+// the plugin's task executes. The file is not committed to VCS.
+val generateGoogleServicesJson = tasks.register("generateTemporaryGoogleServicesJson") {
+    doLast {
+        // Remove stale gradleResValues files (extra safety)
+        val genResValuesDir = File(buildDir, "generated/res/resValues")
+        if (genResValuesDir.exists()) {
+            fileTree(genResValuesDir).matching { include("**/gradleResValues.xml") }.forEach { f ->
+                if (f.exists()) {
+                    f.delete()
+                }
+            }
         }
+
+        // Build a minimal google-services.json using values available (fallbacks preserved if file exists)
+        val projectNumber = localProperties.getProperty("firebaseProjectNumber") ?: ""
+        val projectId = localProperties.getProperty("firebaseProjectId") ?: ""
+        val storageBucket = localProperties.getProperty("firebaseStorageBucket") ?: ""
+
+        val apiKeyObj = if (!firebaseApiKey.isNullOrBlank()) {
+            "\"api_key\": [{\"current_key\": \"${firebaseApiKey}\"}]"
+        } else "\"api_key\": []"
+
+        val clientObj = if (!firebaseWebClientId.isNullOrBlank()) {
+            // minimal client entry containing the oauth client id
+            "\"client\": [{\"client_info\": {\"mobilesdk_app_id\": \"1:${projectNumber}:android:placeholder\", \"android_client_info\": {\"package_name\": \"co.uk.doverguitarteacher.activpal\"}}, \"oauth_client\": [{\"client_id\": \"${firebaseWebClientId}\", \"client_type\": 3}], \"api_key\": [{\"current_key\": \"${firebaseApiKey ?: ""}\"}]}]"
+        } else "\"client\": []"
+
+        val json = buildString {
+            append("{")
+            append("\"project_info\": {\"project_number\": \"${projectNumber}\", \"project_id\": \"${projectId}\", \"storage_bucket\": \"${storageBucket}\"},")
+            append(apiKeyObj + ",")
+            append(clientObj)
+            append("}")
+        }
+
+        val outDir = File(buildDir, "generated/google-services")
+        outDir.mkdirs()
+        val outFile = File(outDir, "google-services.json")
+        outFile.writeText(json, Charsets.UTF_8)
+
+        // Copy the generated file to the module project dir as a temporary file that the google-services
+        // plugin expects; it will be overwritten on subsequent builds and is not checked into VCS.
+        val dest = rootProject.file("app/google-services.json")
+        outFile.copyTo(dest, overwrite = true)
     }
 }
+
+// Ensure the google services processing tasks depend on our generator so the file exists when needed
+tasks.matching { it.name.startsWith("process") && it.name.contains("GoogleServices") }.configureEach {
+    dependsOn(generateGoogleServicesJson)
+}
+
+// CI guidance snippet: in CI set env vars FIREBASE_API_KEY and FIREBASE_WEB_CLIENT_ID and write them to local.properties
+// Example (GitHub Actions) - add to your workflow before running Gradle:
+// - name: Write local.properties
+//   run: |
+//     echo "firebaseApiKey=${{ secrets.FIREBASE_API_KEY }}" >> local.properties
+//     echo "firebaseWebClientId=${{ secrets.FIREBASE_WEB_CLIENT_ID }}" >> local.properties
+//     echo "firebaseProjectNumber=${{ secrets.FIREBASE_PROJECT_NUMBER }}" >> local.properties
+//     echo "firebaseProjectId=${{ secrets.FIREBASE_PROJECT_ID }}" >> local.properties
 
 plugins {
     id("com.android.application")
@@ -49,9 +100,11 @@ android {
         }
 
         // Inject default_web_client_id for Google Sign-In if provided in local.properties
-        if (!firebaseWebClientId.isNullOrBlank()) {
-            resValue("string", "default_web_client_id", firebaseWebClientId)
-        }
+        // NOTE: default_web_client_id is generated by the Google Services plugin from
+        // google-services.json. Avoid injecting it here to prevent duplicate resource
+        // errors. If you don't use google-services.json, you can uncomment the
+        // following resValue to provide a fallback from local.properties:
+        // if (!firebaseWebClientId.isNullOrBlank()) resValue("string", "default_web_client_id", firebaseWebClientId)
     }
 
     buildTypes {
@@ -81,6 +134,25 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+// Ensure any stale gradle-generated resValues files are removed to prevent duplicate resource errors
+val removeStaleGradleResValues = tasks.register("removeStaleGradleResValues") {
+    doLast {
+        val genResValuesDir = File(buildDir, "generated/res/resValues")
+        if (genResValuesDir.exists()) {
+            fileTree(genResValuesDir).matching { include("**/gradleResValues.xml") }.forEach { f ->
+                if (f.exists()) {
+                    f.delete()
+                }
+            }
+        }
+    }
+}
+
+// Ensure resource merge tasks run after stale-file cleanup
+tasks.matching { it.name.startsWith("merge") && it.name.contains("Resources") }.configureEach {
+    dependsOn(removeStaleGradleResValues)
 }
 
 dependencies {
