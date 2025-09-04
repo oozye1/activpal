@@ -320,6 +320,16 @@ private fun MapSection(modifier: Modifier, points: List<LatLng>, latest: LatLng?
             mapView.getMapAsync { gm ->
                 googleMap = gm
                 gm.uiSettings.isZoomControlsEnabled = true
+                // Try to enable the blue "my location" dot.
+                try {
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                        gm.isMyLocationEnabled = true
+                        gm.uiSettings.isMyLocationButtonEnabled = true
+                    }
+                } catch (_: SecurityException) {
+                    // Permission may have been revoked.
+                }
                 if (points.isNotEmpty()) updatePolyline(gm, points, latest)
             }
             mapView
@@ -338,16 +348,16 @@ private fun updatePolyline(map: GoogleMap, points: List<LatLng>, latest: LatLng?
     val poly = PolylineOptions().addAll(points).width(8f)
         .color(0xFF007AFF.toInt())
     map.addPolyline(poly)
-    val boundsBuilder = LatLngBounds.builder()
-    points.forEach { boundsBuilder.include(it) }
-    val bounds = boundsBuilder.build()
-    try {
-        map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 80))
-    } catch (_: Exception) {
-        // ignore if map not laid out yet
-    }
+
     if (latest != null) {
-        map.animateCamera(CameraUpdateFactory.newLatLngZoom(latest, 16f))
+        // When the first point arrives, move camera instantly.
+        // For subsequent points, animate smoothly to follow the user.
+        val cameraUpdate = CameraUpdateFactory.newLatLngZoom(latest, 17f) // Zoom level 17 is good for running/walking
+        if (points.size <= 1) {
+            map.moveCamera(cameraUpdate)
+        } else {
+            map.animateCamera(cameraUpdate)
+        }
     }
 }
 
