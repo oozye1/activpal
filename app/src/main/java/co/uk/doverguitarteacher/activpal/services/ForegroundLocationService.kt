@@ -30,6 +30,14 @@ class ForegroundLocationService : Service() {
         const val EXTRA_ELAPSED_MS = "elapsed_ms"
         const val EXTRA_PACE_S_PER_KM = "pace_s_per_km"
         const val EXTRA_STOPPED = "stopped"
+        const val EXTRA_LAT = "lat"
+        const val EXTRA_LNG = "lng"
+        const val EXTRA_ROLLING_PACE_S_PER_KM = "rolling_pace_s_per_km"
+
+        const val ACTION_PAUSE = "co.uk.doverguitarteacher.activpal.action.PAUSE_TRACKING"
+        const val ACTION_RESUME = "co.uk.doverguitarteacher.activpal.action.RESUME_TRACKING"
+        const val ACTION_DISCARD = "co.uk.doverguitarteacher.activpal.action.DISCARD_TRACKING"
+
         private const val NOTIF_CHANNEL_ID = "activpal_location_channel"
         private const val NOTIF_ID = 2371
     }
@@ -39,6 +47,12 @@ class ForegroundLocationService : Service() {
     private var lastLocation: Location? = null
     private var totalDistanceMeters = 0f
     private var startTimeMillis = 0L
+    private var isPaused = false
+    private var discardRequested = false
+    private val points = mutableListOf<TrackPoint>()
+    private val recentWindowSeconds = 60
+
+    private data class TrackPoint(val lat: Double, val lng: Double, val timeMs: Long, val accuracy: Float)
 
     override fun onCreate() {
         super.onCreate()
@@ -49,6 +63,9 @@ class ForegroundLocationService : Service() {
         when (intent?.action) {
             ACTION_START -> startTracking()
             ACTION_STOP -> stopTrackingAndStopSelf()
+            ACTION_PAUSE -> pauseTracking()
+            ACTION_RESUME -> resumeTracking()
+            ACTION_DISCARD -> { discardRequested = true; stopTrackingAndStopSelf() }
             else -> {
                 // no-op
             }
@@ -88,33 +105,71 @@ class ForegroundLocationService : Service() {
         }
     }
 
+    private fun pauseTracking() {
+        if (!isPaused) {
+            isPaused = true
+            val elapsed = System.currentTimeMillis() - startTimeMillis
+            val notif = buildNotification("Paused — ${formatDistance(totalDistanceMeters)} • ${formatElapsed(elapsed)}")
+            getSystemService(NotificationManager::class.java)?.notify(NOTIF_ID, notif)
+        }
+    }
+
+    private fun resumeTracking() {
+        if (isPaused) {
+            isPaused = false
+            // Reset lastLocation to avoid jump distance from stationary pause
+            lastLocation = null
+            val elapsed = System.currentTimeMillis() - startTimeMillis
+            val notif = buildNotification("Recording — ${formatDistance(totalDistanceMeters)} • ${formatElapsed(elapsed)}")
+            getSystemService(NotificationManager::class.java)?.notify(NOTIF_ID, notif)
+        }
+    }
+
     private fun handleNewLocation(loc: Location) {
+        if (isPaused) {
+            // While paused, ignore distance accumulation but update lastLocation seed without counting distance
+            lastLocation = loc
+            return
+        }
+
+        // Noise filtering: discard if accuracy too poor (>25m) or obviously invalid speed spike after we have a previous point
+        if (loc.hasAccuracy() && loc.accuracy > 25f) return
         val prev = lastLocation
         if (prev != null) {
             val delta = prev.distanceTo(loc)
-            if (delta >= 0f) {
+            // Reject unrealistic jump >100m in one update unless time delta > 10s
+            val timeDelta = loc.time - prev.time
+            val allowJump = timeDelta > 10_000
+            if (delta >= 0f && (delta < 100f || allowJump)) {
                 totalDistanceMeters += delta
+            } else {
+                // Large spike ignored; still advance lastLocation below
             }
         }
         lastLocation = loc
 
+        // Save track point
+        points += TrackPoint(loc.latitude, loc.longitude, System.currentTimeMillis(), loc.accuracy)
+
         val elapsed = System.currentTimeMillis() - startTimeMillis
-        val paceSecPerKm = if (totalDistanceMeters >= 1f) {
-            // seconds per km
+        val paceSecPerKm = if (totalDistanceMeters > 0.5f) { // compute as soon as some distance
             (elapsed / 1000.0f) / (totalDistanceMeters / 1000f)
-        } else {
-            Float.POSITIVE_INFINITY
-        }
+        } else Float.NaN
+
+        val rollingPaceSecPerKm = computeRollingPace()
 
         // Broadcast a simple update Intent
         val update = Intent(ACTION_UPDATE)
         update.putExtra(EXTRA_DISTANCE_METERS, totalDistanceMeters)
         update.putExtra(EXTRA_ELAPSED_MS, elapsed)
         update.putExtra(EXTRA_PACE_S_PER_KM, paceSecPerKm)
+        update.putExtra(EXTRA_ROLLING_PACE_S_PER_KM, rollingPaceSecPerKm)
+        update.putExtra(EXTRA_LAT, loc.latitude)
+        update.putExtra(EXTRA_LNG, loc.longitude)
         sendBroadcast(update)
 
         // Also update ongoing notification
-        val notif = buildNotification("Recording — ${formatDistance(totalDistanceMeters)} • ${formatElapsed(elapsed)}")
+        val notif = buildNotification("${if(isPaused) "Paused" else "Recording"} — ${formatDistance(totalDistanceMeters)} • ${formatElapsed(elapsed)}")
         val mgr = getSystemService(NotificationManager::class.java)
         mgr?.notify(NOTIF_ID, notif)
     }
@@ -133,7 +188,9 @@ class ForegroundLocationService : Service() {
             (duration / 1000.0f) / (totalDistanceMeters / 1000f)
         } else Float.POSITIVE_INFINITY
 
-        persistSummary(startTimeMillis, endTime, totalDistanceMeters, duration, avgPace)
+        if (!discardRequested) {
+            persistSummary(startTimeMillis, endTime, totalDistanceMeters, duration, avgPace)
+        }
 
         // Broadcast final update indicating stopped state so UI can reset if needed
         val final = Intent(ACTION_UPDATE).apply {
@@ -161,6 +218,18 @@ class ForegroundLocationService : Service() {
                 put("duration_ms", durationMs)
                 if (avgPaceSecPerKm.isFinite()) put("avg_pace_s_per_km", avgPaceSecPerKm)
                 put("created_at", System.currentTimeMillis())
+                put("points_count", points.size)
+                val ptsArray = org.json.JSONArray()
+                points.forEach { p ->
+                    val pObj = JSONObject()
+                    pObj.put("lat", p.lat)
+                    pObj.put("lng", p.lng)
+                    pObj.put("t", p.timeMs)
+                    pObj.put("acc", p.accuracy)
+                    ptsArray.put(pObj)
+                }
+                put("points", ptsArray)
+                put("discarded", false)
             }
             FileWriter(activityFile).use { it.write(obj.toString()) }
             Log.d(TAG, "Saved activity to ${activityFile.absolutePath}")
@@ -206,6 +275,28 @@ class ForegroundLocationService : Service() {
             .setContentIntent(pending)
             .setOngoing(true)
             .build()
+    }
+
+    private fun computeRollingPace(): Float {
+        if (points.size < 2) return Float.NaN
+        val now = System.currentTimeMillis()
+        val windowStart = now - recentWindowSeconds * 1000
+        // Collect points in window
+        val windowPoints = points.filter { it.timeMs >= windowStart }
+        if (windowPoints.size < 2) return Float.NaN
+        var dist = 0f
+        for (i in 1 until windowPoints.size) {
+            val a = windowPoints[i - 1]
+            val b = windowPoints[i]
+            val locA = Location("win").apply { latitude = a.lat; longitude = a.lng }
+            val locB = Location("win").apply { latitude = b.lat; longitude = b.lng }
+            dist += locA.distanceTo(locB)
+        }
+        if (dist < 10f) return Float.NaN // not enough movement
+        val timeSpanSec = (windowPoints.last().timeMs - windowPoints.first().timeMs) / 1000f
+        if (timeSpanSec <= 0f) return Float.NaN
+        val km = dist / 1000f
+        return (timeSpanSec / km)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

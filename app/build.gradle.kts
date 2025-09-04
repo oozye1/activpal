@@ -63,6 +63,10 @@ android {
         buildConfigField("String", "FIREBASE_PROJECT_ID", "\"${projectId}\"")
         buildConfigField("String", "FIREBASE_STORAGE_BUCKET", "\"${storageBucket}\"")
 
+        // Google Maps API key (optional). Add mapsApiKey=YOUR_KEY to local.properties (DO NOT COMMIT).
+        val mapsApiKey = localProperties.getProperty("mapsApiKey") ?: ""
+        resValue("string", "google_maps_key", mapsApiKey)
+
         // google-services plugin present; default_web_client_id will come from google-services.json.
 // CI reminder: write local.properties from secrets (do NOT commit local.properties). Example GitHub Actions steps:
 // - name: Write local.properties
@@ -105,6 +109,29 @@ android {
     }
 }
 
+// Generate a sanitized google-services.json at build time if the file is absent.
+// This avoids committing real credentials. Real values come from local.properties.
+val generateGoogleServices by tasks.registering {
+    doLast {
+        val file = File(projectDir, "google-services.json")
+        if (!file.exists()) {
+            val projectNumber = localProperties.getProperty("firebaseProjectNumber") ?: "000000000000"
+            val projectId = localProperties.getProperty("firebaseProjectId") ?: "your_project_id"
+            val storageBucket = localProperties.getProperty("firebaseStorageBucket") ?: "your_bucket"
+            val apiKey = localProperties.getProperty("firebaseApiKey") ?: "AIzaSyPLACEHOLDER"
+            val mobileAppId = "1:${projectNumber}:android:placeholder" // placeholder format
+            file.writeText(
+                """{
+  \"project_info\": {\n    \"project_number\": \"$projectNumber\",\n    \"project_id\": \"$projectId\",\n    \"storage_bucket\": \"$storageBucket\"\n  },\n  \"client\": [\n    {\n      \"client_info\": {\n        \"mobilesdk_app_id\": \"$mobileAppId\",\n        \"android_client_info\": {\n          \"package_name\": \"co.uk.doverguitarteacher.activpal\"\n        }\n      },\n      \"oauth_client\": [],\n      \"api_key\": [ { \"current_key\": \"$apiKey\" } ],\n      \"services\": {\n        \"appinvite_service\": {\n          \"other_platform_oauth_client\": []\n        }\n      }\n    }\n  ],\n  \"configuration_version\": \"1\"\n}\n""".trimIndent()
+            )
+            println("Generated sanitized google-services.json (placeholders) at ${file.absolutePath}")
+        }
+    }
+}
+
+// Ensure generation runs early if the file is missing.
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(generateGoogleServices) }
+
 dependencies {
     // Core Android & Jetpack Compose dependencies
     implementation("androidx.core:core-ktx:1.17.0")
@@ -127,6 +154,8 @@ dependencies {
 
     // Play Services Location for GPS / fused location updates
     implementation("com.google.android.gms:play-services-location:21.0.1")
+    // Google Maps SDK
+    implementation("com.google.android.gms:play-services-maps:18.2.0")
 
     // Coil for Compose - load profile images
     implementation("io.coil-kt:coil-compose:2.7.0")

@@ -25,6 +25,23 @@ import androidx.navigation.NavHostController
 import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService
 import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.EXTRA_STOPPED
 import android.content.Context.RECEIVER_NOT_EXPORTED
+import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.ACTION_DISCARD
+import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.ACTION_PAUSE
+import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.ACTION_RESUME
+import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.EXTRA_LAT
+import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.EXTRA_LNG
+import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.EXTRA_ROLLING_PACE_S_PER_KM
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.GoogleMap
+import com.google.android.gms.maps.MapView
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.android.gms.maps.model.PolylineOptions
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,6 +53,10 @@ fun RecordScreen(navController: NavHostController) {
     var distanceMeters by remember { mutableStateOf(0f) }
     var elapsedMs by remember { mutableStateOf(0L) }
     var paceSecPerKm by remember { mutableStateOf(Float.POSITIVE_INFINITY) }
+    var rollingPaceSecPerKm by remember { mutableStateOf(Float.NaN) }
+    var lastLatLng by remember { mutableStateOf<LatLng?>(null) }
+    val trackPoints = remember { mutableStateListOf<LatLng>() }
+    var isPaused by remember { mutableStateOf(false) }
 
     // Permission launcher
     val launcher = rememberLauncherForActivityResult(
@@ -75,8 +96,17 @@ fun RecordScreen(navController: NavHostController) {
                 distanceMeters = intent.getFloatExtra(ForegroundLocationService.EXTRA_DISTANCE_METERS, 0f)
                 elapsedMs = intent.getLongExtra(ForegroundLocationService.EXTRA_ELAPSED_MS, 0L)
                 paceSecPerKm = intent.getFloatExtra(ForegroundLocationService.EXTRA_PACE_S_PER_KM, Float.POSITIVE_INFINITY)
+                rollingPaceSecPerKm = intent.getFloatExtra(EXTRA_ROLLING_PACE_S_PER_KM, Float.NaN)
+                val lat = intent.getDoubleExtra(EXTRA_LAT, Double.NaN)
+                val lng = intent.getDoubleExtra(EXTRA_LNG, Double.NaN)
+                if (!lat.isNaN() && !lng.isNaN()) {
+                    val p = LatLng(lat, lng)
+                    lastLatLng = p
+                    trackPoints.add(p)
+                }
                 if (intent.getBooleanExtra(EXTRA_STOPPED, false)) {
                     isRecording = false
+                    isPaused = false
                 }
             }
         }
@@ -115,16 +145,14 @@ fun RecordScreen(navController: NavHostController) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Placeholder for the map
-            Box(
+            MapSection(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(bottom = 16.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Map will go here", fontSize = 24.sp)
-            }
+                points = trackPoints.toList(),
+                latest = lastLatLng
+            )
 
             // Placeholder for stats
             Row(
@@ -134,54 +162,76 @@ fun RecordScreen(navController: NavHostController) {
                 StatText(title = "Distance", value = formatDistance(distanceMeters))
                 StatText(title = "Time", value = formatElapsed(elapsedMs))
                 StatText(title = "Pace", value = formatPace(paceSecPerKm))
+                StatText(title = "Recent", value = formatPace(rollingPaceSecPerKm))
             }
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Start/Stop Button
-            Button(
-                onClick = {
-                    if (!isRecording) {
-                        // Check runtime permissions
-                        val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                        val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                        if (fine || coarse) {
-                            // For Android Q+ we should request background location separately if not granted
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                val bgGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
-                                if (!bgGranted) {
-                                    bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                                    return@Button
+            // Control buttons row
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        if (!isRecording) {
+                            val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                            val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                            if (fine || coarse) {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    val bgGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+                                    if (!bgGranted) {
+                                        bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                                        return@Button
+                                    }
                                 }
-                            }
-                            // On Android 13+ request notification permission (optional)
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                val notifGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-                                if (!notifGranted) {
-                                    notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    val notifGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+                                    if (!notifGranted) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                                 }
+                                startRecordingService(context)
+                                isRecording = true
+                                isPaused = false
+                                trackPoints.clear()
+                            } else {
+                                launcher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
                             }
-                            startRecordingService(context)
-                            isRecording = true
                         } else {
-                            // Ask for permissions (fine & coarse). Background location is requested separately by platform if needed.
-                            launcher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                            stopRecordingService(context)
+                            isRecording = false
+                            isPaused = false
                         }
-                    } else {
-                        // Stop service
-                        stopRecordingService(context)
+                    }, modifier = Modifier.weight(1f)
+                ) { Text(if (isRecording) "Stop" else "Start") }
+
+                Button(
+                    enabled = isRecording,
+                    onClick = {
+                        if (isPaused) {
+                            sendServiceAction(context, ACTION_RESUME)
+                            isPaused = false
+                        } else {
+                            sendServiceAction(context, ACTION_PAUSE)
+                            isPaused = true
+                        }
+                    }, modifier = Modifier.weight(1f)
+                ) { Text(if (isPaused) "Resume" else "Pause") }
+
+                Button(
+                    enabled = isRecording,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    onClick = {
+                        // Discard: send discard action which prevents persistence
+                        sendServiceAction(context, ACTION_DISCARD)
                         isRecording = false
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                )
-            ) {
-                Text(if (isRecording) "STOP" else "START", fontSize = 20.sp)
+                        isPaused = false
+                        trackPoints.clear()
+                        distanceMeters = 0f
+                        elapsedMs = 0L
+                        paceSecPerKm = Float.POSITIVE_INFINITY
+                        rollingPaceSecPerKm = Float.NaN
+                    }, modifier = Modifier.weight(1f)
+                ) { Text("Discard") }
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
         }
     }
 }
@@ -223,8 +273,9 @@ private fun formatElapsed(ms: Long): String {
     return String.format(java.util.Locale.US, "%02d:%02d:%02d", hh, mm, ss)
 }
 
+// Extended pace formatting to handle NaN
 private fun formatPace(paceSecPerKm: Float): String {
-    return if (paceSecPerKm.isFinite()) {
+    return if (paceSecPerKm.isFinite() && !paceSecPerKm.isNaN()) {
         val seconds = paceSecPerKm.toInt()
         val mm = seconds / 60
         val ss = seconds % 60
@@ -232,4 +283,75 @@ private fun formatPace(paceSecPerKm: Float): String {
     } else {
         "--:--"
     }
+}
+
+@Composable
+private fun MapSection(modifier: Modifier, points: List<LatLng>, latest: LatLng?) {
+    val context = LocalContext.current
+    val mapView = remember { MapView(context) }
+    var googleMap by remember { mutableStateOf<GoogleMap?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Observe lifecycle and forward events to the MapView
+    DisposableEffect(lifecycleOwner, mapView) {
+        val observer = object : DefaultLifecycleObserver {
+            override fun onCreate(owner: LifecycleOwner) {
+                try { mapView.onCreate(null) } catch (_: Exception) {}
+            }
+
+            override fun onStart(owner: LifecycleOwner) { mapView.onStart() }
+            override fun onResume(owner: LifecycleOwner) { mapView.onResume() }
+            override fun onPause(owner: LifecycleOwner) { mapView.onPause() }
+            override fun onStop(owner: LifecycleOwner) { mapView.onStop() }
+            override fun onDestroy(owner: LifecycleOwner) {
+                try { mapView.onDestroy() } catch (_: Exception) {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            try { mapView.onDestroy() } catch (_: Exception) {}
+        }
+    }
+
+    AndroidView(
+        modifier = modifier,
+        factory = {
+            mapView.getMapAsync { gm ->
+                googleMap = gm
+                gm.uiSettings.isZoomControlsEnabled = true
+                if (points.isNotEmpty()) updatePolyline(gm, points, latest)
+            }
+            mapView
+        },
+        update = { mv ->
+            googleMap?.let { gm ->
+                if (points.isNotEmpty()) updatePolyline(gm, points, latest)
+            }
+        }
+    )
+}
+
+private fun updatePolyline(map: GoogleMap, points: List<LatLng>, latest: LatLng?) {
+    map.clear()
+    if (points.isEmpty()) return
+    val poly = PolylineOptions().addAll(points).width(8f)
+        .color(0xFF007AFF.toInt())
+    map.addPolyline(poly)
+    val boundsBuilder = LatLngBounds.builder()
+    points.forEach { boundsBuilder.include(it) }
+    val bounds = boundsBuilder.build()
+    try {
+        map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 80))
+    } catch (_: Exception) {
+        // ignore if map not laid out yet
+    }
+    if (latest != null) {
+        map.animateCamera(CameraUpdateFactory.newLatLngZoom(latest, 16f))
+    }
+}
+
+private fun sendServiceAction(context: Context, action: String) {
+    val i = Intent(context, ForegroundLocationService::class.java).apply { this.action = action }
+    context.startService(i)
 }
