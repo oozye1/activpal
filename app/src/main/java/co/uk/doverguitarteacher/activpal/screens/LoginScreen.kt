@@ -20,6 +20,7 @@ import com.google.android.gms.common.api.ApiException
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.ktx.Firebase
+import co.uk.doverguitarteacher.activpal.BuildConfig
 
 @Composable
 fun LoginScreen(navController: NavHostController) {
@@ -30,12 +31,12 @@ fun LoginScreen(navController: NavHostController) {
 
     // Prepare Google Sign-In
     val activity = (LocalContext.current as? Activity)
-    // Safely get default_web_client_id resource (may not be present if not injected)
+    // Safely get default_web_client_id resource (may not be present). Fall back to BuildConfig.
     val defaultWebClientId = try {
         context.getString(R.string.default_web_client_id)
     } catch (_: Exception) {
         ""
-    }
+    }.ifBlank { BuildConfig.FIREBASE_WEB_CLIENT_ID }
 
     val gsoBuilder = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
         .requestEmail()

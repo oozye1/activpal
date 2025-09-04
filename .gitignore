@@ -13,3 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Ignore generated Google services json written at build time
+/app/google-services.json
+# Local secrets
+/local.properties
+# Gradle build outputs
+/build/
+/app/build/

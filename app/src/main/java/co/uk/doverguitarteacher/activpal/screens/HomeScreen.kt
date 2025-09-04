@@ -279,7 +279,9 @@ fun HomeScreen(navController: NavHostController) {
                     TextButton(onClick = {
                         // Save profile changes
                         savingProfile = true
-                        val update = userProfileChangeRequest { displayName = editingName }
+                        val update = com.google.firebase.auth.UserProfileChangeRequest.Builder()
+                            .setDisplayName(editingName)
+                            .build()
                         user?.updateProfile(update)?.addOnCompleteListener { t ->
                             savingProfile = false
                             showProfileDialog = false

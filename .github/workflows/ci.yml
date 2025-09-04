@@ -1,0 +1,51 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Write local.properties from secrets
+        run: |
+          echo "firebaseApiKey=${{ secrets.FIREBASE_API_KEY }}" >> local.properties
+          echo "firebaseWebClientId=${{ secrets.FIREBASE_WEB_CLIENT_ID }}" >> local.properties
+          echo "firebaseProjectNumber=${{ secrets.FIREBASE_PROJECT_NUMBER }}" >> local.properties
+          echo "firebaseProjectId=${{ secrets.FIREBASE_PROJECT_ID }}" >> local.properties
+          echo "firebaseStorageBucket=${{ secrets.FIREBASE_STORAGE_BUCKET }}" >> local.properties
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Archive APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+

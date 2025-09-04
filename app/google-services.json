@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "367090623924",
+    "project_id": "stravaconle",
+    "storage_bucket": "stravaconle.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:367090623924:android:6b832ef13878b684f07ee1",
+        "android_client_info": {
+          "package_name": "co.uk.doverguitarteacher.activpal"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "367090623924-a0uu1bafo03ju38ov88nioa5qeli10lg.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "co.uk.doverguitarteacher.activpal",
+            "certificate_hash": "f6bd653c733431bd87e852a774776fd90cd0f5ee"
+          }
+        },
+        {
+          "client_id": "367090623924-be6bk8bqiagb7f2lbg5aq6m3kmbbkpbv.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDctJUuZhHKhbTH5_8u5Cu_CuXP6aTesQg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "367090623924-be6bk8bqiagb7f2lbg5aq6m3kmbbkpbv.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
+

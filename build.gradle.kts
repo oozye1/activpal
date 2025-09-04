@@ -5,3 +5,6 @@ plugins {
     alias(libs.plugins.kotlin.compose) apply false
     id("com.google.gms.google-services") version "4.3.15" apply false
 }
+
+// Repositories are defined centrally in settings.gradle.kts (repositoriesMode = FAIL_ON_PROJECT_REPOS)
+// so we must not declare them again here.
