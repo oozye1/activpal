@@ -35,7 +35,7 @@ android {
     defaultConfig {
         applicationId = "co.uk.doverguitarteacher.activpal"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
@@ -124,6 +124,9 @@ dependencies {
 
     // Google Sign-In (Play Services Auth)
     implementation("com.google.android.gms:play-services-auth:21.4.0")
+
+    // Play Services Location for GPS / fused location updates
+    implementation("com.google.android.gms:play-services-location:21.0.1")
 
     // Coil for Compose - load profile images
     implementation("io.coil-kt:coil-compose:2.7.0")
