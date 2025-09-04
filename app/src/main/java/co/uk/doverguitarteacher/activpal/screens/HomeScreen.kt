@@ -1,21 +1,31 @@
 package co.uk.doverguitarteacher.activpal.screens
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ExitToApp
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import com.google.firebase.auth.ktx.auth
+import com.google.firebase.ktx.Firebase
 import androidx.navigation.NavHostController
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Surface
+import androidx.compose.ui.graphics.Color
 
 // A simple data class to represent a fake activity
 data class Activity(val userName: String, val type: String, val distance: String)
@@ -32,10 +42,57 @@ val dummyActivities = listOf(
 @Composable
 // MODIFICATION: The function now accepts the NavHostController
 fun HomeScreen(navController: NavHostController) {
+    val context = LocalContext.current
+    val user = Firebase.auth.currentUser
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Activity Feed") },
+                title = {
+                    // Show avatar + title
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (user?.photoUrl != null) {
+                            AsyncImage(
+                                model = user.photoUrl,
+                                contentDescription = "Profile photo",
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape),
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        } else {
+                            // Fallback circle with person icon
+                            Surface(
+                                modifier = Modifier.size(40.dp),
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.2f)
+                            ) {
+                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                    Icon(
+                                        imageVector = Icons.Default.Person,
+                                        contentDescription = "Profile placeholder",
+                                        tint = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Text("Activity Feed")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = {
+                        // Sign out
+                        Firebase.auth.signOut()
+                        // Navigate back to login and clear backstack
+                        navController.navigate("login") {
+                            popUpTo("home") { inclusive = true }
+                        }
+                    }) {
+                        Icon(Icons.Default.ExitToApp, contentDescription = "Sign out")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary

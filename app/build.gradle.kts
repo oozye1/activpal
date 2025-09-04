@@ -104,6 +104,9 @@ dependencies {
     // Google Sign-In (Play Services Auth)
     implementation("com.google.android.gms:play-services-auth:20.7.0")
 
+    // Coil for Compose - load profile images
+    implementation("io.coil-kt:coil-compose:2.4.0")
+
     // Standard Testing libraries
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
