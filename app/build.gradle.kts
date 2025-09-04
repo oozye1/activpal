@@ -1,8 +1,35 @@
+import java.util.Properties
+
+// Load local.properties (kept out of VCS) to read secret values like firebaseApiKey and firebaseWebClientId
+val localProperties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) {
+        f.inputStream().use { load(it) }
+    }
+}
+val firebaseApiKey: String? = localProperties.getProperty("firebaseApiKey")
+val firebaseWebClientId: String? = localProperties.getProperty("firebaseWebClientId")
+
+// Robustly inject the firebaseApiKey into app/google-services.json if present locally.
+// Use a regex to replace the entire api_key array (handles whitespace and existing content).
+if (!firebaseApiKey.isNullOrBlank()) {
+    val gsFile = rootProject.file("app/google-services.json")
+    if (gsFile.exists()) {
+        val text = gsFile.readText(Charsets.UTF_8)
+        val apiKeyRegex = Regex("\"api_key\"\\s*:\\s*\\[[^\\]]*\\]")
+        if (apiKeyRegex.containsMatchIn(text) && !text.contains("\"current_key\"")) {
+            val replacement = "\"api_key\": [{\"current_key\": \"${firebaseApiKey}\"}]"
+            val newText = apiKeyRegex.replace(text, replacement)
+            gsFile.writeText(newText, Charsets.UTF_8)
+        }
+    }
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
-    id("org.jetbrains.kotlin.plugin.compose") // THIS IS THE LINE I MISSED. I AM SORRY.
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -19,6 +46,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+
+        // Inject default_web_client_id for Google Sign-In if provided in local.properties
+        if (!firebaseWebClientId.isNullOrBlank()) {
+            resValue("string", "default_web_client_id", firebaseWebClientId)
         }
     }
 
@@ -68,6 +100,9 @@ dependencies {
 
     // Firebase Authentication library
     implementation("com.google.firebase:firebase-auth-ktx")
+
+    // Google Sign-In (Play Services Auth)
+    implementation("com.google.android.gms:play-services-auth:20.7.0")
 
     // Standard Testing libraries
     testImplementation("junit:junit:4.13.2")
