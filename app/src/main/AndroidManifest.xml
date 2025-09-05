@@ -35,7 +35,9 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.Activpal">
+            android:theme="@style/Theme.Activpal"
+            android:configChanges="orientation|screenSize|keyboardHidden|layoutDirection|uiMode"
+            tools:targetApi="31">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

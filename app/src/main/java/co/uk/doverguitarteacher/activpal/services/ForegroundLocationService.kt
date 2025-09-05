@@ -45,12 +45,16 @@ class ForegroundLocationService : Service() {
         const val ACTION_RESUME = "co.uk.doverguitarteacher.activpal.action.RESUME_TRACKING"
         const val ACTION_DISCARD = "co.uk.doverguitarteacher.activpal.action.DISCARD_TRACKING"
         const val ACTION_START_SIM = "co.uk.doverguitarteacher.activpal.action.START_SIM" // start with simulated GPS route
+        const val ACTION_REQUEST_SNAPSHOT = "co.uk.doverguitarteacher.activpal.action.REQUEST_SNAPSHOT"
 
         private const val NOTIF_CHANNEL_ID = "activpal_location_channel"
         private const val NOTIF_ID = 2371
         const val EXTRA_FGS_LOCATION_REQUIRED = "fgs_location_required" // legacy flag kept for backward compatibility
         const val EXTRA_NEEDS_FGS_PERMISSION = "needs_fgs_permission"
         const val EXTRA_NEEDS_LOCATION_PERMISSION = "needs_location_permission"
+
+        const val EXTRA_POINT_LATS = "extra_point_lats"
+        const val EXTRA_POINT_LNGS = "extra_point_lngs"
     }
 
     private lateinit var fusedClient: FusedLocationProviderClient
@@ -84,6 +88,10 @@ class ForegroundLocationService : Service() {
             ACTION_PAUSE -> pauseTracking()
             ACTION_RESUME -> resumeTracking()
             ACTION_DISCARD -> { discardRequested = true; stopTrackingAndStopSelf() }
+            ACTION_REQUEST_SNAPSHOT -> {
+                Log.d(TAG, "Snapshot requested by UI; broadcasting full path size=${points.size}")
+                broadcastStatus(includeFullPath = true)
+            }
             else -> { }
         }
         return START_STICKY
@@ -125,10 +133,11 @@ class ForegroundLocationService : Service() {
             return
         }
 
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
-            .setMinUpdateDistanceMeters(1f)
-            .setMinUpdateIntervalMillis(1000L)
-            .setWaitForAccurateLocation(false) // don't stall indoors
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+            .setMinUpdateIntervalMillis(500L) // allow faster callbacks if available
+            .setMinUpdateDistanceMeters(0f)   // report every movement
+            .setWaitForAccurateLocation(false)
+            .setMaxUpdateDelayMillis(0L)
             .build()
 
         locationCallback = object : LocationCallback() {
@@ -154,6 +163,7 @@ class ForegroundLocationService : Service() {
                     // even if null, push an initial status so UI starts timer
                     broadcastStatus()
                 }
+                lastFixMs = System.currentTimeMillis() // initialize so periodic poll logic works immediately
                 startPeriodicBroadcasts()
             }
             fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
@@ -430,7 +440,7 @@ class ForegroundLocationService : Service() {
         return (timeSpanSec / km)
     }
 
-    private fun broadcastStatus(stopped: Boolean = false) {
+    private fun broadcastStatus(stopped: Boolean = false, includeFullPath: Boolean = false) {
         val elapsed = System.currentTimeMillis() - startTimeMillis
         val paceSecPerKm = if (totalDistanceMeters > 0.5f) {
             (elapsed / 1000.0f) / (totalDistanceMeters / 1000f)
@@ -451,7 +461,15 @@ class ForegroundLocationService : Service() {
             }
             if (stopped) putExtra(EXTRA_STOPPED, true)
             putExtra(EXTRA_SIMULATING, isSimulating)
+            if (includeFullPath && points.isNotEmpty()) {
+                // Pack full path for UI reconstruction after configuration change.
+                val lats = DoubleArray(points.size) { points[it].lat }
+                val lngs = DoubleArray(points.size) { points[it].lng }
+                putExtra(EXTRA_POINT_LATS, lats)
+                putExtra(EXTRA_POINT_LNGS, lngs)
+            }
         }
+        Log.d(TAG, "broadcastStatus dist=${"%.1f".format(totalDistanceMeters)} pts=${points.size} stopped=$stopped last=${last?.latitude},${last?.longitude} includeFullPath=$includeFullPath")
         sendBroadcast(update)
     }
 
