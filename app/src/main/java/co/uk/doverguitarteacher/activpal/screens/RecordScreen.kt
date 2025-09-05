@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.Location
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -36,10 +37,8 @@ import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.MapView
 import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.PolylineOptions
-import com.google.android.gms.maps.model.Polyline
 import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -47,9 +46,12 @@ import kotlinx.coroutines.delay
 import kotlin.math.*
 import android.util.Log
 import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.EXTRA_SIMULATING
+import co.uk.doverguitarteacher.activpal.services.ForegroundLocationService.Companion.EXTRA_FGS_LOCATION_REQUIRED
 import com.google.android.gms.maps.model.Marker
 import com.google.android.gms.maps.model.MarkerOptions
 import java.util.Locale
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -71,6 +73,78 @@ fun RecordScreen(navController: NavHostController) {
     var isPaused by remember { mutableStateOf(false) }
     var isSimulating by remember { mutableStateOf(false) }
     var followCamera by remember { mutableStateOf(true) }
+    val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+
+    // Helper function to reset state for new recording
+    fun resetStateForNewRecording() {
+        // DO NOT clear lastLatLng so we can seed map immediately after fetch
+        trackPoints.clear()
+        lastAccuracy = null
+        lastSpeedMps = null
+        distanceMeters = 0f
+        elapsedMs = 0L
+        recordingStartMs = System.currentTimeMillis()
+        paceSecPerKm = Float.POSITIVE_INFINITY
+        rollingPaceSecPerKm = Float.NaN
+        isPaused = false
+        isSimulating = false
+    }
+
+    fun startRecordingWithPermissions() {
+        // First reset metrics & path (but keep any fetched lastLatLng until we overwrite it)
+        resetStateForNewRecording()
+        followCamera = true
+        try {
+            fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+                .addOnSuccessListener { location: Location? ->
+                    if (location != null) {
+                        val seed = LatLng(location.latitude, location.longitude)
+                        lastLatLng = seed
+                        if (trackPoints.isEmpty()) trackPoints.add(seed)
+                        Log.d("RecordScreen", "Seed location lat=${seed.latitude} lng=${seed.longitude}")
+                    } else {
+                        Log.d("RecordScreen", "Seed location null")
+                    }
+                    // Start service after (or regardless of) seed attempt
+                    startRecordingService(context)
+                    isRecording = true
+                }
+                .addOnFailureListener { e ->
+                    Log.e("RecordScreen", "Failed initial location, starting anyway", e)
+                    startRecordingService(context)
+                    isRecording = true
+                }
+        } catch (se: SecurityException) {
+            Log.e("RecordScreen", "SecurityException getting initial location, starting anyway", se)
+            startRecordingService(context)
+            isRecording = true
+        }
+    }
+
+    // Foreground-service-location permission launcher (Android 14+ / targetSdk 34 requires this at runtime)
+    var pendingFgsAction by remember { mutableStateOf<String?>(null) }
+    val fgsLauncher = rememberLauncherForActivityResult(RequestPermission()) { granted ->
+        Log.d("RecordScreen", "FGS location permission result: $granted, pendingAction: $pendingFgsAction")
+        if (granted && pendingFgsAction != null) {
+            when (pendingFgsAction) {
+                "START" -> {
+                    Log.d("RecordScreen", "Starting service after FGS permission grant")
+                    resetStateForNewRecording()
+                    startRecordingService(context)
+                    isRecording = true
+                }
+                "SIM" -> {
+                    Log.d("RecordScreen", "Starting simulation after FGS permission grant")
+                    resetStateForNewRecording()
+                    followCamera = true
+                    sendServiceAction(context, ACTION_START_SIM)
+                    isRecording = true
+                    isSimulating = true
+                }
+            }
+        }
+        pendingFgsAction = null
+    }
 
     // Permission launcher
     val launcher = rememberLauncherForActivityResult(
@@ -78,28 +152,41 @@ fun RecordScreen(navController: NavHostController) {
         onResult = { perms ->
             val fine = perms[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
             val coarse = perms[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
-            // Background and notification permissions may not be granted automatically; still attempt to start when fine/coarse exists
+            Log.d("RecordScreen", "Location permissions result: fine=$fine, coarse=$coarse")
             if (fine || coarse) {
-                // start the service
-                startRecordingService(context)
-                isRecording = true
+                // Check if we need FGS permission on Android 14+
+                if (Build.VERSION.SDK_INT >= 34) {
+                    val fgsGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.FOREGROUND_SERVICE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    if (!fgsGranted) {
+                        Log.d("RecordScreen", "Need FGS permission, requesting...")
+                        pendingFgsAction = "START"
+                        fgsLauncher.launch(Manifest.permission.FOREGROUND_SERVICE_LOCATION)
+                        return@rememberLauncherForActivityResult
+                    }
+                }
+                // Start the service now that we have permissions
+                Log.d("RecordScreen", "Permissions granted, starting recording flow.")
+                startRecordingWithPermissions()
+            } else {
+                Log.d("RecordScreen", "Location permissions denied")
             }
         }
     )
 
     // Background location permission launcher (requested separately on Android Q+)
     val bgLauncher = rememberLauncherForActivityResult(RequestPermission()) { granted ->
-        if (granted) {
-            startRecordingService(context)
-            isRecording = true
-        }
-        // If user denies, we still start if foreground location is available (optional)
+        Log.d("RecordScreen", "Background location permission result: $granted")
+        // Background location is optional, don't block on it
     }
 
     // Notification permission launcher (Android 13+)
     val notifLauncher = rememberLauncherForActivityResult(RequestPermission()) { granted ->
-        // we don't strictly require notification permission to start the service, but it's recommended
+        Log.d("RecordScreen", "Notification permission result: $granted")
+        // Notification permission is optional, don't block on it
     }
+
+    // Flag set when the service broadcasts that it couldn't start due to missing FOREGROUND_SERVICE_LOCATION
+    var showFgsDialog by remember { mutableStateOf(false) }
 
     // BroadcastReceiver to consume updates from the foreground service
     DisposableEffect(Unit) {
@@ -107,6 +194,12 @@ fun RecordScreen(navController: NavHostController) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 intent ?: return
+
+                // If service signals it failed to start because FOREGROUND_SERVICE_LOCATION is required,
+                // show a dialog to let the user grant the permission.
+                if (intent.getBooleanExtra(EXTRA_FGS_LOCATION_REQUIRED, false)) {
+                    showFgsDialog = true
+                }
 
                 // Service-provided values (may be missing or stale)
                 val providedDistance = intent.getFloatExtra(ForegroundLocationService.EXTRA_DISTANCE_METERS, -1f)
@@ -219,6 +312,26 @@ fun RecordScreen(navController: NavHostController) {
         }
     }
 
+    // Dialog to request FOREGROUND_SERVICE_LOCATION when the service reports it is required
+    if (showFgsDialog) {
+        AlertDialog(
+            onDismissRequest = { showFgsDialog = false },
+            title = { Text("Foreground location permission required") },
+            text = { Text("To run location tracking on Android 14+ the app needs the FOREGROUND_SERVICE_LOCATION runtime permission. Grant it to continue.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    // Default to attempting a normal start after permission grant — user can retry simulate if desired
+                    pendingFgsAction = "START"
+                    fgsLauncher.launch(Manifest.permission.FOREGROUND_SERVICE_LOCATION)
+                    showFgsDialog = false
+                }) { Text("Grant") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFgsDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     // Maintain a local elapsedMs based on recordingStartMs so UI updates smoothly
     LaunchedEffect(isRecording, recordingStartMs, isPaused) {
         while (isRecording && !isPaused) {
@@ -234,7 +347,6 @@ fun RecordScreen(navController: NavHostController) {
         topBar = {
             TopAppBar(
                 title = { Text("Record Activity") },
-                // This adds a back button to the top bar
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -249,7 +361,7 @@ fun RecordScreen(navController: NavHostController) {
                 .padding(innerPadding)
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            verticalArrangement = Arrangement.Top
         ) {
             MapSection(
                 modifier = Modifier
@@ -258,12 +370,13 @@ fun RecordScreen(navController: NavHostController) {
                     .padding(bottom = 16.dp),
                 points = trackPoints.toList(),
                 latest = lastLatLng,
+                latestAccuracy = lastAccuracy,
                 follow = followCamera,
                 distanceMeters = distanceMeters,
                 isSim = isSimulating
             )
 
-            // Placeholder for stats
+            // PlaceHolder for stats
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
@@ -288,42 +401,63 @@ fun RecordScreen(navController: NavHostController) {
                     Button(
                         onClick = {
                             if (!isRecording) {
+                                Log.d("RecordScreen", "Start button clicked")
+
+                                // Check basic location permissions first
                                 val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
                                 val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                                if (fine || coarse) {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                        val bgGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
-                                        if (!bgGranted) {
-                                            bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                                            return@Button
-                                        }
-                                    }
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                        val notifGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-                                        if (!notifGranted) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                    }
-                                    // Reset runtime state for a fresh recording
-                                    trackPoints.clear()
-                                    lastLatLng = null
-                                    lastAccuracy = null
-                                    lastSpeedMps = null
-                                    distanceMeters = 0f
-                                    elapsedMs = 0L
-                                    recordingStartMs = System.currentTimeMillis()
-                                    paceSecPerKm = Float.POSITIVE_INFINITY
-                                    rollingPaceSecPerKm = Float.NaN
-                                    startRecordingService(context)
-                                    isRecording = true
-                                    isPaused = false
-                                } else {
+
+                                if (!fine && !coarse) {
+                                    Log.d("RecordScreen", "Requesting location permissions")
                                     launcher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                                    return@Button
                                 }
+
+                                // Check foreground service location permission on Android 14+
+                                if (Build.VERSION.SDK_INT >= 34) {
+                                    val fgsGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.FOREGROUND_SERVICE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                                    if (!fgsGranted) {
+                                        Log.d("RecordScreen", "Requesting FGS location permission")
+                                        pendingFgsAction = "START"
+                                        fgsLauncher.launch(Manifest.permission.FOREGROUND_SERVICE_LOCATION)
+                                        return@Button
+                                    }
+                                }
+
+                                // Request background location (optional but recommended)
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    val bgGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+                                    if (!bgGranted) {
+                                        Log.d("RecordScreen", "Background location not granted, requesting...")
+                                        // Don't block on this - just request it
+                                        bgLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                                    }
+                                }
+
+                                // Request notification permission (optional)
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    val notifGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+                                    if (!notifGranted) {
+                                        Log.d("RecordScreen", "Notification permission not granted, requesting...")
+                                        notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                 }
+
+                                // All required permissions are granted, start recording
+                                Log.d("RecordScreen", "Permissions already granted, starting recording flow.")
+                                startRecordingWithPermissions()
                             } else {
+                                Log.d("RecordScreen", "Stopping recording service")
                                 stopRecordingService(context)
                                 isRecording = false
                                 isPaused = false
+                                isSimulating = false
                             }
-                        }, modifier = Modifier.weight(1f)
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
                     ) { Text(if (isRecording) "Stop" else "Start") }
 
                     Button(
@@ -336,12 +470,15 @@ fun RecordScreen(navController: NavHostController) {
                                 sendServiceAction(context, ACTION_PAUSE)
                                 isPaused = true
                             }
-                        }, modifier = Modifier.weight(1f)
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isPaused) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                        )
                     ) { Text(if (isPaused) "Resume" else "Pause") }
 
                     Button(
                         enabled = isRecording,
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                         onClick = {
                             // Discard: send discard action which prevents persistence
                             sendServiceAction(context, ACTION_DISCARD)
@@ -352,7 +489,9 @@ fun RecordScreen(navController: NavHostController) {
                             elapsedMs = 0L
                             paceSecPerKm = Float.POSITIVE_INFINITY
                             rollingPaceSecPerKm = Float.NaN
-                        }, modifier = Modifier.weight(1f)
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                     ) { Text("Discard") }
                 }
 
@@ -373,23 +512,29 @@ fun RecordScreen(navController: NavHostController) {
                 ) {
                     Button(
                         onClick = {
+                            // On Android 14+ require FOREGROUND_SERVICE_LOCATION before asking the service to start a foreground location FGS
+                            if (Build.VERSION.SDK_INT >= 34) {
+                                val fgsGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.FOREGROUND_SERVICE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                                if (!fgsGranted) {
+                                    // prepare pending action then ask permission
+                                    pendingFgsAction = "SIM"
+                                    fgsLauncher.launch(Manifest.permission.FOREGROUND_SERVICE_LOCATION)
+                                    return@Button
+                                }
+                            }
                             Log.d("RecordScreen", "Simulate button clicked")
                             // Reset runtime state then start simulation service action
-                            trackPoints.clear()
-                            lastLatLng = null
-                            lastAccuracy = null
-                            lastSpeedMps = null
-                            distanceMeters = 0f
-                            elapsedMs = 0L
-                            recordingStartMs = System.currentTimeMillis()
-                            paceSecPerKm = Float.POSITIVE_INFINITY
-                            rollingPaceSecPerKm = Float.NaN
+                            resetStateForNewRecording()
                             followCamera = true
                             sendServiceAction(context, ACTION_START_SIM)
                             isRecording = true
                             isPaused = false
                             isSimulating = true
-                        }, modifier = Modifier.weight(1f)
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isSimulating) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                        )
                     ) { Text("Simulate") }
 
                     Button(
@@ -497,6 +642,7 @@ private fun MapSection(
     modifier: Modifier,
     points: List<LatLng>,
     latest: LatLng?,
+    latestAccuracy: Float? = null,
     follow: Boolean = true,
     distanceMeters: Float = 0f,
     isSim: Boolean = false
@@ -504,24 +650,33 @@ private fun MapSection(
     val context = LocalContext.current
     val mapView = remember { MapView(context) }
     var googleMap by remember { mutableStateOf<GoogleMap?>(null) }
-    var polyline by remember { mutableStateOf<Polyline?>(null) }
-    var latestMarker by remember { mutableStateOf<Marker?>(null) }
+    var latestMarker by remember { mutableStateOf<com.google.android.gms.maps.model.Marker?>(null) }
+
+    // Small LocationSource we can push locations into so the GoogleMap blue dot follows our points
+    class LocationSourceWithListener : com.google.android.gms.maps.LocationSource {
+        var listener: com.google.android.gms.maps.LocationSource.OnLocationChangedListener? = null
+        override fun activate(onLocationChangedListener: com.google.android.gms.maps.LocationSource.OnLocationChangedListener) {
+            Log.d("MapSection", "LocationSource activated")
+            listener = onLocationChangedListener
+        }
+        override fun deactivate() {
+            Log.d("MapSection", "LocationSource deactivated")
+            listener = null
+        }
+    }
+
+    val locationSource = remember { LocationSourceWithListener() }
+    val polylineHelper = remember { PolylineHelper() }
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Observe lifecycle and forward events to the MapView
     DisposableEffect(lifecycleOwner, mapView) {
         val observer = object : DefaultLifecycleObserver {
-            override fun onCreate(owner: LifecycleOwner) {
-                try { mapView.onCreate(null) } catch (_: Exception) {}
-            }
-
+            override fun onCreate(owner: LifecycleOwner) { try { mapView.onCreate(null) } catch (_: Exception) {} }
             override fun onStart(owner: LifecycleOwner) { mapView.onStart() }
             override fun onResume(owner: LifecycleOwner) { mapView.onResume() }
             override fun onPause(owner: LifecycleOwner) { mapView.onPause() }
             override fun onStop(owner: LifecycleOwner) { mapView.onStop() }
-            override fun onDestroy(owner: LifecycleOwner) {
-                try { mapView.onDestroy() } catch (_: Exception) {}
-            }
+            override fun onDestroy(owner: LifecycleOwner) { try { mapView.onDestroy() } catch (_: Exception) {} }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
@@ -531,11 +686,12 @@ private fun MapSection(
     }
 
     AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = {
+        modifier = modifier,
+        factory = { _ ->
             mapView.getMapAsync { gm ->
                 googleMap = gm
                 gm.uiSettings.isZoomControlsEnabled = true
+                try { gm.setLocationSource(locationSource) } catch (_: Exception) {}
                 try {
                     if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
@@ -544,52 +700,87 @@ private fun MapSection(
                     }
                 } catch (_: SecurityException) {}
 
-                if (points.isNotEmpty()) {
-                    if (polyline == null) {
-                        polyline = gm.addPolyline(PolylineOptions().addAll(points).width(8f).color(0xFF007AFF.toInt()))
-                    } else polyline?.points = points
-                    latest?.let {
-                        if (latestMarker == null) latestMarker = gm.addMarker(MarkerOptions().position(it).title("Current")) else latestMarker?.position = it
-                        if (follow) moveCameraForPoint(gm, it, points.size <= 1)
+                polylineHelper.updatePolyline(gm, points)
+                latest?.let {
+                    // Show marker until we have at least 2 points forming a visible polyline
+                    val needMarker = points.size < 2
+                    if (gm.isMyLocationEnabled && !needMarker) {
+                        try { latestMarker?.remove() } catch (_: Exception) {}
+                        latestMarker = null
+                    } else {
+                        if (latestMarker == null) latestMarker = gm.addMarker(MarkerOptions().position(it).title("Start")) else latestMarker?.position = it
                     }
+                    if (follow) moveCameraForPoint(gm, it, points.size <= 1)
                 }
             }
             mapView
         },
-        update = {
+        update = { _ ->
             googleMap?.let { gm ->
-                if (polyline == null && points.isNotEmpty()) {
-                    polyline = gm.addPolyline(PolylineOptions().addAll(points).width(8f).color(0xFF007AFF.toInt()))
-                } else polyline?.points = points
-                latest?.let {
-                    if (latestMarker == null) latestMarker = gm.addMarker(MarkerOptions().position(it).title("Current")) else latestMarker?.position = it
-                    if (follow) moveCameraForPoint(gm, it, false)
+                try {
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                        if (!gm.isMyLocationEnabled) {
+                            gm.isMyLocationEnabled = true
+                            gm.uiSettings.isMyLocationButtonEnabled = true
+                        }
+                        try { latestMarker?.remove() } catch (_: Exception) {}
+                        latestMarker = null
+                    }
+                } catch (_: SecurityException) { }
+
+                polylineHelper.updatePolyline(gm, points)
+
+                latest?.let { latlng ->
+                    try {
+                        val loc = Location("app").apply {
+                            latitude = latlng.latitude
+                            longitude = latlng.longitude
+                            accuracy = latestAccuracy ?: 10f
+                            time = System.currentTimeMillis()
+                        }
+
+                        try {
+                            if (locationSource.listener != null) {
+                                Log.d("MapSection", "Pushing location to map: ${loc.latitude}, ${loc.longitude} (acc=${loc.accuracy})")
+                                locationSource.listener?.onLocationChanged(loc)
+                            } else {
+                                Log.d("MapSection", "No LocationSource listener active to receive loc: ${loc.latitude}, ${loc.longitude}")
+                            }
+                        } catch (e: Exception) {
+                            Log.w("MapSection", "Failed to push location to map listener", e)
+                        }
+
+                        if (!gm.isMyLocationEnabled) {
+                            if (latestMarker == null) latestMarker = gm.addMarker(MarkerOptions().position(latlng).title("Current")) else latestMarker?.position = latlng
+                        }
+
+                        if (follow) moveCameraForPoint(gm, latlng, points.size <= 1)
+                    } catch (e: Exception) {
+                        Log.w("MapSection", "Error injecting location into map", e)
+                    }
                 }
+
                 Log.d("RecordScreen", "Map update: points=${points.size}")
             }
         }
     )
 
-    // Overlay for debug stats
+    // overlay for debug stats
     Column(modifier = Modifier.padding(6.dp)) {
         Surface(color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)) {
             Column(modifier = Modifier.padding(6.dp)) {
-                Text(
-                    text = "PTS ${points.size} Dist ${String.format(Locale.US, "%.1f", distanceMeters)}m",
-                    style = MaterialTheme.typography.labelSmall
-                )
-                Text(
-                    text = if (isSim) "SIM" else "LIVE",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isSim) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
-                )
+                Text(text = "PTS ${points.size} Dist ${String.format(Locale.US, "%.1f", distanceMeters)}m", style = MaterialTheme.typography.labelSmall)
+                Text(text = if (isSim) "SIM" else "LIVE", style = MaterialTheme.typography.labelSmall, color = if (isSim) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary)
             }
         }
     }
+
+    DisposableEffect(Unit) { onDispose { polylineHelper.clear() } }
 }
 
 private fun moveCameraForPoint(map: GoogleMap, point: LatLng, instant: Boolean) {
-    val cameraUpdate = CameraUpdateFactory.newLatLngZoom(point, 17f)
+    val cameraUpdate = com.google.android.gms.maps.CameraUpdateFactory.newLatLngZoom(point, 17f)
     if (instant) map.moveCamera(cameraUpdate) else map.animateCamera(cameraUpdate)
 }
 

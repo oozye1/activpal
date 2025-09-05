@@ -6,6 +6,9 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.Manifest
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Build
 import android.os.Handler
@@ -45,6 +48,9 @@ class ForegroundLocationService : Service() {
 
         private const val NOTIF_CHANNEL_ID = "activpal_location_channel"
         private const val NOTIF_ID = 2371
+        const val EXTRA_FGS_LOCATION_REQUIRED = "fgs_location_required" // legacy flag kept for backward compatibility
+        const val EXTRA_NEEDS_FGS_PERMISSION = "needs_fgs_permission"
+        const val EXTRA_NEEDS_LOCATION_PERMISSION = "needs_location_permission"
     }
 
     private lateinit var fusedClient: FusedLocationProviderClient
@@ -85,13 +91,39 @@ class ForegroundLocationService : Service() {
 
     private fun startTracking() {
         Log.d(TAG, "startTracking")
+        // On Android 14+ ensure the FOREGROUND_SERVICE_LOCATION runtime permission is granted before starting FGS with type=location
+        if (Build.VERSION.SDK_INT >= 34) {
+            val fgsOk = ContextCompat.checkSelfPermission(this, Manifest.permission.FOREGROUND_SERVICE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val locOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (!fgsOk || !locOk) {
+                Log.e(TAG, "Cannot start tracking: missing perms fgsOk=$fgsOk locOk=$locOk")
+                val update = Intent(ACTION_UPDATE).apply {
+                    // legacy flag triggers previous UI dialog
+                    putExtra(EXTRA_FGS_LOCATION_REQUIRED, true)
+                    putExtra(EXTRA_NEEDS_FGS_PERMISSION, !fgsOk)
+                    putExtra(EXTRA_NEEDS_LOCATION_PERMISSION, !locOk)
+                }
+                sendBroadcast(update)
+                stopSelf()
+                return
+            }
+        }
         totalDistanceMeters = 0f
         lastLocation = null
         startTimeMillis = System.currentTimeMillis()
 
         createNotificationChannelIfNeeded()
         val notification = buildNotification("Recording activity…")
-        startForeground(NOTIF_ID, notification)
+        try {
+            startForeground(NOTIF_ID, notification)
+        } catch (se: SecurityException) {
+            Log.e(TAG, "SecurityException starting foreground (tracking)", se)
+            val update = Intent(ACTION_UPDATE).apply { putExtra(EXTRA_FGS_LOCATION_REQUIRED, true) }
+            sendBroadcast(update)
+            stopSelf()
+            return
+        }
 
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
             .setMinUpdateDistanceMeters(1f)
@@ -194,6 +226,23 @@ class ForegroundLocationService : Service() {
 
     private fun startSimulation() {
         Log.d(TAG, "startSimulation")
+        // On Android 14+ ensure the FOREGROUND_SERVICE_LOCATION runtime permission is granted before starting FGS with type=location
+        if (Build.VERSION.SDK_INT >= 34) {
+            val fgsOk = ContextCompat.checkSelfPermission(this, Manifest.permission.FOREGROUND_SERVICE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val locOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (!fgsOk || !locOk) {
+                Log.e(TAG, "Cannot start simulation: missing FOREGROUND_SERVICE_LOCATION or location permission. fgsOk=$fgsOk locOk=$locOk")
+                val update = Intent(ACTION_UPDATE).apply {
+                    putExtra(EXTRA_FGS_LOCATION_REQUIRED, true)
+                    putExtra(EXTRA_NEEDS_FGS_PERMISSION, !fgsOk)
+                    putExtra(EXTRA_NEEDS_LOCATION_PERMISSION, !locOk)
+                }
+                sendBroadcast(update)
+                stopSelf()
+                return
+            }
+        }
         // Prepare synthetic short route (rectangle loop) near a fixed coordinate (adjust as needed)
         val baseLat = 51.1640514
         val baseLng = 1.2890638
@@ -220,7 +269,15 @@ class ForegroundLocationService : Service() {
         simIndex = 0
         createNotificationChannelIfNeeded()
         val notification = buildNotification("Simulating activity…")
-        startForeground(NOTIF_ID, notification)
+        try {
+            startForeground(NOTIF_ID, notification)
+        } catch (se: SecurityException) {
+            Log.e(TAG, "SecurityException starting foreground (simulation)", se)
+            val update = Intent(ACTION_UPDATE).apply { putExtra(EXTRA_FGS_LOCATION_REQUIRED, true) }
+            sendBroadcast(update)
+            stopSelf()
+            return
+        }
         broadcastStatus()
         startPeriodicBroadcasts()
         feedNextSimPoint() // kick off
