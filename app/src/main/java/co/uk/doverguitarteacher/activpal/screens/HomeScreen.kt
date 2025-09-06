@@ -1,6 +1,5 @@
 package co.uk.doverguitarteacher.activpal.screens
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -8,7 +7,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
@@ -19,13 +17,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import com.google.firebase.auth.ktx.auth
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.ValueEventListener
+import com.google.firebase.database.ktx.database
+import com.google.firebase.database.ktx.getValue
 import com.google.firebase.ktx.Firebase
 import androidx.navigation.NavHostController
 import androidx.compose.foundation.shape.CircleShape
@@ -33,19 +35,21 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.graphics.Color
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
-import com.google.android.gms.common.api.ApiException
 import com.google.firebase.auth.ktx.userProfileChangeRequest
 import androidx.compose.ui.window.Dialog
+import com.google.firebase.database.IgnoreExtraProperties
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-// A simple data class to represent a fake activity
-data class Activity(val userName: String, val type: String, val distance: String)
-
-// A list of fake activities to show in our feed
-val dummyActivities = listOf(
-    Activity("John Doe", "Morning Run", "5.2 km"),
-    Activity("Jane Smith", "Afternoon Cycling", "15.7 km"),
-    Activity("Peter Jones", "Evening Walk", "2.1 km"),
-    Activity("John Doe", "Weekend Hike", "10.5 km")
+// Data class to represent a route stored in Firebase
+@IgnoreExtraProperties
+data class Route(
+    val id: String = "",
+    val timestamp: Long = 0,
+    val distanceMeters: Float = 0f,
+    val elapsedMs: Long = 0,
+    val points: List<HashMap<String, Double>> = emptyList()
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -54,12 +58,34 @@ val dummyActivities = listOf(
 fun HomeScreen(navController: NavHostController) {
     val context = LocalContext.current
     val user = Firebase.auth.currentUser
+    var routes by remember { mutableStateOf<List<Route>>(emptyList()) }
 
     var showProfileDialog by remember { mutableStateOf(false) }
     var showFullImage by remember { mutableStateOf(false) }
     var expandedMenu by remember { mutableStateOf(false) }
     var editingName by remember { mutableStateOf(user?.displayName ?: "") }
     var savingProfile by remember { mutableStateOf(false) }
+
+    DisposableEffect(user?.uid) {
+        val uid = user?.uid
+        if (uid != null) {
+            val dbRef = com.google.firebase.database.FirebaseDatabase.getInstance().getReference("routes").child(uid)
+            val listener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    val newRoutes = snapshot.children.mapNotNull { it.getValue<Route>() }.sortedByDescending { it.timestamp }
+                    routes = newRoutes
+                }
+
+                override fun onCancelled(error: DatabaseError) {
+                    android.util.Log.w("HomeScreen", "loadRoutes:onCancelled", error.toException())
+                }
+            }
+            dbRef.addValueEventListener(listener)
+            onDispose { dbRef.removeEventListener(listener) }
+        } else {
+            onDispose { /* no-op */ }
+        }
+    }
 
     fun signOutAndNavigate() {
         Firebase.auth.signOut()
@@ -69,27 +95,19 @@ fun HomeScreen(navController: NavHostController) {
     }
 
     fun revokeGoogleAccessAndSignOut() {
-        // Try to revoke Google access in addition to Firebase signOut
+        // Try to revoke Google access in addition to Firebase signOut (no ID token needed here)
         try {
-            val defaultWebClientId = try {
-                context.getString(co.uk.doverguitarteacher.activpal.R.string.default_web_client_id)
-            } catch (_: Exception) {
-                ""
-            }
-            val gsoBuilder = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
                 .requestEmail()
-            if (defaultWebClientId.isNotBlank()) gsoBuilder.requestIdToken(defaultWebClientId)
-            val gso = gsoBuilder.build()
+                .build()
             val client = GoogleSignIn.getClient(context, gso)
             client.revokeAccess().addOnCompleteListener {
-                // Regardless of revoke result, sign out locally
                 Firebase.auth.signOut()
                 navController.navigate("login") {
                     popUpTo("home") { inclusive = true }
                 }
             }
-        } catch (e: Exception) {
-            // Fallback: just sign out
+        } catch (_: Exception) {
             Firebase.auth.signOut()
             navController.navigate("login") {
                 popUpTo("home") { inclusive = true }
@@ -240,8 +258,22 @@ fun HomeScreen(navController: NavHostController) {
                     .fillMaxSize()
                     .padding(8.dp)
             ) {
-                items(dummyActivities) { activity ->
-                    ActivityCard(activity)
+                if (routes.isEmpty()) {
+                    item {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text("No activities recorded yet.")
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Press the '+' button to start one!")
+                        }
+                    }
+                } else {
+                    items(routes) { route ->
+                        RouteCard(route)
+                    }
                 }
             }
         }
@@ -321,7 +353,7 @@ fun HomeScreen(navController: NavHostController) {
 }
 
 @Composable
-fun ActivityCard(activity: Activity) {
+fun RouteCard(route: Route) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -332,9 +364,23 @@ fun ActivityCard(activity: Activity) {
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(text = activity.userName, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-            Text(text = activity.type, color = MaterialTheme.colorScheme.primary)
-            Text(text = "Distance: ${activity.distance}")
+            Text(
+                text = "Activity on ${SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()).format(Date(route.timestamp))}",
+                fontWeight = FontWeight.Bold,
+                fontSize = 18.sp
+            )
+            Text(text = "Distance: ${formatDistance(route.distanceMeters)}", color = MaterialTheme.colorScheme.primary)
+            Text(text = "Duration: ${formatElapsed(route.elapsedMs)}")
         }
     }
+}
+
+private fun formatDistance(m: Float): String = String.format(Locale.US, "%.2f km", m / 1000f)
+
+private fun formatElapsed(ms: Long): String {
+    val s = ms / 1000
+    val hh = s / 3600
+    val mm = (s % 3600) / 60
+    val ss = s % 60
+    return String.format(Locale.US, "%02d:%02d:%02d", hh, mm, ss)
 }

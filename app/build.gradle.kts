@@ -99,9 +99,6 @@ android {
         compose = true
         buildConfig = true
     }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.6.2"
-    }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -109,62 +106,44 @@ android {
     }
 }
 
-// Generate a sanitized google-services.json at build time if the file is absent.
-// This avoids committing real credentials. Real values come from local.properties.
-val generateGoogleServices by tasks.registering {
-    doLast {
-        val file = File(projectDir, "google-services.json")
-        if (!file.exists()) {
-            val projectNumber = localProperties.getProperty("firebaseProjectNumber") ?: "000000000000"
-            val projectId = localProperties.getProperty("firebaseProjectId") ?: "your_project_id"
-            val storageBucket = localProperties.getProperty("firebaseStorageBucket") ?: "your_bucket"
-            val apiKey = localProperties.getProperty("firebaseApiKey") ?: "AIzaSyPLACEHOLDER"
-            val mobileAppId = "1:${projectNumber}:android:placeholder" // placeholder format
-            file.writeText(
-                """{
-  \"project_info\": {\n    \"project_number\": \"$projectNumber\",\n    \"project_id\": \"$projectId\",\n    \"storage_bucket\": \"$storageBucket\"\n  },\n  \"client\": [\n    {\n      \"client_info\": {\n        \"mobilesdk_app_id\": \"$mobileAppId\",\n        \"android_client_info\": {\n          \"package_name\": \"co.uk.doverguitarteacher.activpal\"\n        }\n      },\n      \"oauth_client\": [],\n      \"api_key\": [ { \"current_key\": \"$apiKey\" } ],\n      \"services\": {\n        \"appinvite_service\": {\n          \"other_platform_oauth_client\": []\n        }\n      }\n    }\n  ],\n  \"configuration_version\": \"1\"\n}\n""".trimIndent()
-            )
-            println("Generated sanitized google-services.json (placeholders) at ${file.absolutePath}")
-        }
-    }
-}
-
-// Ensure generation runs early if the file is missing.
-tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(generateGoogleServices) }
-
 dependencies {
-    // Core Android & Jetpack Compose dependencies
-    implementation("androidx.core:core-ktx:1.17.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.3")
-    implementation("androidx.activity:activity-compose:1.10.1")
-    implementation(platform("androidx.compose:compose-bom:2025.08.01"))
+    // Firebase
+    implementation(platform("com.google.firebase:firebase-bom:32.2.0"))
+    implementation("com.google.firebase:firebase-auth-ktx")
+    implementation("com.google.firebase:firebase-database-ktx")
+    implementation("com.google.android.gms:play-services-auth:20.6.0")
+    // Location services for ForegroundLocationService
+    implementation("com.google.android.gms:play-services-location:21.0.1")
+
+    // Core Android & Jetpack
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
+    // Compose-aware lifecycle utilities (LocalLifecycleOwner)
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.6.2")
+    implementation("androidx.activity:activity-compose:1.7.2")
+
+    // Compose UI
+    implementation(platform("androidx.compose:compose-bom:2023.08.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.navigation:navigation-compose:2.9.3")
+    // Extended material icons (AutoMirrored group)
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.navigation:navigation-compose:2.7.2")
 
-    // Firebase: switched from BoM to explicit version per request
-    // (Previous: implementation(platform("com.google.firebase:firebase-bom:34.2.0")))
-    implementation("com.google.firebase:firebase-auth-ktx:22.2.0")
-    // firebase-common-ktx not needed explicitly; comes transitively from auth
+    // Google Maps
+    implementation("com.google.android.gms:play-services-maps:18.1.0")
+    implementation("com.google.maps.android:maps-compose:2.11.4")
 
-    // Google Sign-In (Play Services Auth)
-    implementation("com.google.android.gms:play-services-auth:21.4.0")
+    // Coil for image loading
+    implementation("io.coil-kt:coil-compose:2.4.0")
 
-    // Play Services Location for GPS / fused location updates
-    implementation("com.google.android.gms:play-services-location:21.0.1")
-    // Google Maps SDK
-    implementation("com.google.android.gms:play-services-maps:18.2.0")
-
-    // Coil for Compose - load profile images
-    implementation("io.coil-kt:coil-compose:2.7.0")
-
-    // Standard Testing libraries
+    // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-    androidTestImplementation(platform("androidx.compose:compose-bom:2025.08.01"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2023.08.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
